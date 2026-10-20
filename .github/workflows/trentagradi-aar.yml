@@ -1,0 +1,97 @@
+# Trentagradi (https://github.com/robertopinotti/trentagradi): MapLibre Android with 3D
+# terrain, built from this branch (feature/terrain-3d plus the open terrain PRs merged on
+# top) until an official pre-release exists. Each push builds the Vulkan (android-sdk,
+# android-sdk-vulkan) and OpenGL ES (android-sdk-opengl) release AARs for a phone
+# (arm64-v8a) and the emulator (x86_64), and attaches them as a Maven repository to a
+# GitHub release.
+name: trentagradi-aar
+
+on:
+  push:
+    branches: [trentagradi/terrain-3d]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: trentagradi-aar
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        renderer: [vulkan, opengl]
+    defaults:
+      run:
+        working-directory: platform/android
+    env:
+      IS_LOCAL_DEVELOPMENT: false
+      RENDERER: ${{ matrix.renderer }}
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Version
+        run: |
+          echo "$(cat VERSION)-terrain3d-${GITHUB_SHA::7}" > VERSION
+          cat VERSION
+
+      - name: Use the runner's CMake
+        run: echo "cmake.dir=$(dirname "$(dirname "$(command -v cmake)")")" >> local.properties
+
+      - name: Build and publish
+        run: |
+          ./gradlew --max-workers=4 -Pmaplibre.abis="arm64-v8a x86_64" \
+            -PpublicationRepositoryUrl="file://$PWD/build/maven-repository" \
+            ":MapLibreAndroid:publish${RENDERER^}ReleasePublications"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: maven-${{ matrix.renderer }}
+          path: platform/android/build/maven-repository
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: maven-*
+          path: maven-repository
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="android-terrain3d-${GITHUB_SHA::7}"
+          version=$(ls maven-repository/org/maplibre/gl/android-sdk/ | grep terrain3d)
+          zip -qr maplibre-android-terrain3d.zip maven-repository
+          gh release create "$tag" maplibre-android-terrain3d.zip \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "MapLibre Android $version" \
+            --notes "MapLibre Android $version: feature/terrain-3d with the open terrain PRs merged, built for arm64-v8a and x86_64. A Maven repository with org.maplibre.gl:android-sdk (Vulkan), android-sdk-vulkan and android-sdk-opengl."
